@@ -1,7 +1,7 @@
 # semserv
 High-performance semaphore service useable with long string ipc keys stored in memory.
 
-## Contributing
+#### Contributing
 
 Project need your contributes.
 
@@ -13,7 +13,7 @@ Run client with
 
 (Node.js is good for playground.)
 
-## Todo
+#### Todo
 
 * PHP Adapter
 * Node.js Adapter

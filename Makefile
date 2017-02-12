@@ -2,7 +2,9 @@ C=gcc
 CFLAGS=-c -Wall
 
 all:
-	$(C) -pthread -o build/semserv.exe src/semserv.c
+	mkdir -p build
+	$(C) -pthread -o build/semserv src/semserv.c
+	@echo "\n\texecutable created: build/semserv\n"
 
 clean:
 	rm -rf build/*

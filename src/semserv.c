@@ -26,8 +26,6 @@
 #define SEM_STATE_LOCKED 1
 #define SEM_STATE_AVAILABLE 2
 
-#define SEM_SHM_IPC_KEY_FILENAME "shmkey.semserv"
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,16 +34,10 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <errno.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
 #include <unistd.h>
 #include <signal.h>
 
 #include "../lib/uthash/src/uthash.h"
-
-static pthread_mutex_t sem_mutex;
-static key_t shm_key;
-static int keys_arr_shm;
 
 typedef struct {
     char name[30];
@@ -79,6 +71,7 @@ typedef struct {
 } receive_packet_param_t;
 
 void handle_connection(handle_connection_param_t* param);
+void check_recv_result(ssize_t result);
 void receive_packet(receive_packet_param_t* param);
 void response_thread_f(receive_packet_param_t* param);
 void read_thread_f(read_thread_param_t* param);
@@ -88,18 +81,7 @@ void free_receive_packet_param(receive_packet_param_t* param);
 void exit_handler(int sig);
 
 int main(int argc, char *argv[]) {
-    if (access(SEM_SHM_IPC_KEY_FILENAME, F_OK) == -1) {
-        FILE* shm_key_fd;
-        shm_key_fd = fopen(SEM_SHM_IPC_KEY_FILENAME, "w");
-        fclose(shm_key_fd);
-    }
-
-    shm_key = ftok(SEM_SHM_IPC_KEY_FILENAME, 'R');
-    keys_arr_shm = shmget(shm_key, 0, IPC_CREAT | 0770);
-
     sems_hash_t *semaphores = NULL;
-
-    pthread_mutex_init(&sem_mutex, NULL);
 
     signal(SIGINT, exit_handler);
 
@@ -152,6 +134,7 @@ int main(int argc, char *argv[]) {
             handle_connection_param->client_socket = client_socket;
             handle_connection_param->semaphores = semaphores;
             handle_connection(handle_connection_param);
+            close(client_socket);
             exit(0);
         } else {
             close(client_socket);
@@ -200,8 +183,12 @@ void handle_connection(handle_connection_param_t* param) {
     );
 
     pthread_join(read_thread, NULL);
+}
 
-    //for (;;) {}
+void check_recv_result(ssize_t result) {
+    if (result == 0) {
+        pthread_exit(NULL);
+    }
 }
 
 void receive_packet(receive_packet_param_t* param) {
@@ -209,7 +196,9 @@ void receive_packet(receive_packet_param_t* param) {
 
     if (param->state == STREAMING_STATE_WAITING) {
         uint16_t packet_signature_buf;
+
         result = recv(param->socket, &packet_signature_buf, PACKET_SIGNATURE_LEN, MSG_WAITALL);
+        check_recv_result(result);
 
         if (!check_socket_op_result(&result)) return;
 
@@ -221,6 +210,7 @@ void receive_packet(receive_packet_param_t* param) {
         }
     } else if (param->state == STREAMING_STATE_DEFINING) {
         result = recv(param->socket, &param->data_len, PACKET_KEY_SIZE_LEN, MSG_WAITALL);
+        check_recv_result(result);
 
         if (!check_socket_op_result(&result)) return;
 
@@ -229,16 +219,19 @@ void receive_packet(receive_packet_param_t* param) {
     } else if (param->state == STREAMING_STATE_KEY_STREAMING) {
         param->key_buf = malloc((param->data_len+1) * sizeof(char));
         *(param->key_buf+param->data_len) = '\0';
+
         result = recv(param->socket, param->key_buf, param->data_len, MSG_WAITALL);
+        check_recv_result(result);
+
         param->state = STREAMING_STATE_CMD;
 
         if (!check_socket_op_result(&result)) return;
 
         printf("key: %s\n", param->key_buf);
     } else if (param->state == STREAMING_STATE_CMD) {
-        pthread_mutex_lock(&sem_mutex);
-
         result = recv(param->socket, &param->cmd, PACKET_CMD_LEN, MSG_WAITALL);
+        check_recv_result(result);
+
         param->state = STREAMING_STATE_WAITING;
         if (!check_socket_op_result(&result)) return;
 
@@ -250,9 +243,6 @@ void receive_packet(receive_packet_param_t* param) {
             (void *) &response_thread_f,
             (void *) param
         );
-
-        //pthread_join(response_thread, NULL);
-        pthread_mutex_unlock(&sem_mutex);
     }
     
     receive_packet(param);
@@ -295,8 +285,6 @@ void response_thread_f(receive_packet_param_t* param) {
         (void *) &write_thread_f,
         (void *) write_thread_param
     );
-
-    //pthread_join(write_thread, NULL);
 }
 
 uint8_t check_socket_op_result(ssize_t* result) {
@@ -316,13 +304,6 @@ void exit_handler(int sig) {
     if (sig == SIGINT) {
         printf("Keyboard interrupt, exiting..");
     }
-
-    if (access(SEM_SHM_IPC_KEY_FILENAME, F_OK) != -1) {
-        remove(SEM_SHM_IPC_KEY_FILENAME);
-    }
-
-    pthread_mutex_destroy(&sem_mutex);
-    shmctl(keys_arr_shm, IPC_RMID, NULL);
 
     printf("Semserv stopped successfully.");
 
