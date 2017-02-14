@@ -22,17 +22,18 @@ var data_buf = new Buffer(0);
 socket.on('data', function (data) {
     data_buf = Buffer.concat([data_buf, new Buffer(data)]);
     
-    if (data_buf.length < 7) {
+    if (data_buf.length < 2) {
         return;
     }
 
     var signature = data_buf.readUInt16LE(0);
 
     if (signature != PACKET_SIGNATURE) {
+        data_buf = new Buffer(0);
         return;
     }
 
-    if (data_buf.length < 5) {
+    if (data_buf.length < 7) {
         return;
     }
 
