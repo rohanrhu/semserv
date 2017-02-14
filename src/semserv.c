@@ -37,28 +37,38 @@
 #include <unistd.h>
 #include <signal.h>
 
-#include "../lib/uthash/src/uthash.h"
+#include "../lib/uthash.h"
 
 typedef struct {
     char name[30];
     uint8_t state;
+    int lock_num;
     UT_hash_handle hh;
 } sems_hash_t;
 
 typedef struct {
+    int *sockets;
+    int sockets_len;
+    int sockets_i;
+} clients_t;
+
+typedef struct {
     int client_socket;
-    sems_hash_t* semaphores;
+    sems_hash_t** semaphores;
+    clients_t* clients;
 } handle_connection_param_t;
 
 typedef struct {
     int socket;
-    sems_hash_t* semaphores;
+    sems_hash_t** semaphores;
+    clients_t* clients;
 } read_thread_param_t;
 
 typedef struct {
     int socket;
     uint8_t state;
     char* key;
+    clients_t* clients;
 } write_thread_param_t;
 
 typedef struct {
@@ -67,21 +77,25 @@ typedef struct {
     uint8_t cmd;
     uint32_t data_len;
     uint8_t state;
-    sems_hash_t* semaphores;
+    sems_hash_t** semaphores;
+    clients_t* clients;
 } receive_packet_param_t;
 
 void handle_connection(handle_connection_param_t* param);
-void check_recv_result(ssize_t result);
+void client_handler_f(handle_connection_param_t* param);
+void check_recv_result(receive_packet_param_t* param, ssize_t result);
 void receive_packet(receive_packet_param_t* param);
 void response_thread_f(receive_packet_param_t* param);
 void read_thread_f(read_thread_param_t* param);
 void write_thread_f(write_thread_param_t* param);
 uint8_t check_socket_op_result(ssize_t* result);
-void free_receive_packet_param(receive_packet_param_t* param);
 void exit_handler(int sig);
 
+pthread_mutex_t mutex;
+
 int main(int argc, char *argv[]) {
-    sems_hash_t *semaphores = NULL;
+    sems_hash_t* _semaphores = NULL;
+    sems_hash_t** semaphores = &_semaphores;
 
     signal(SIGINT, exit_handler);
 
@@ -111,9 +125,17 @@ int main(int argc, char *argv[]) {
     listen(server_socket, 5);
     cli_addr_len = sizeof(cli_addr);
 
+    clients_t *clients;
+
+    clients = malloc(sizeof(clients_t));
+    clients->sockets_len = 0;
+    clients->sockets_i = 0;
+
     printf("Server is listening from 0.0.0.0:%d\n", port);
 
-    pid_t pid;
+    pthread_mutex_init(&mutex, NULL);
+
+    pthread_t client_handler;
 
     for (;;) {
         client_socket = accept(server_socket, (struct sockaddr *) &cli_addr, &cli_addr_len);
@@ -122,28 +144,54 @@ int main(int argc, char *argv[]) {
             exit(1);
         }
 
-        pid = fork();
+        int i;
 
-        if (pid < 0) {
-            perror("Fork error");
-            exit(1);
-        } else if (pid == 0) {
-            close(server_socket);
-            handle_connection_param_t* handle_connection_param;
-            handle_connection_param = malloc(sizeof(handle_connection_param_t));
-            handle_connection_param->client_socket = client_socket;
-            handle_connection_param->semaphores = semaphores;
-            handle_connection(handle_connection_param);
-            close(client_socket);
-            exit(0);
+        if (clients->sockets_len == 0) {
+            clients->sockets = (int *) malloc((++clients->sockets_len)*(sizeof(int)));
+            clients->sockets[clients->sockets_i++] = client_socket;
         } else {
-            close(client_socket);
+            int* tmp = malloc((sizeof(int)*clients->sockets_len));
+            memcpy(tmp, clients->sockets, (clients->sockets_len*sizeof(int)));
+            free(clients->sockets);
+            clients->sockets = malloc((sizeof(int)*clients->sockets_len)-sizeof(int));
+
+            i = 0;
+
+            for (; i < clients->sockets_len; i++) {
+                clients->sockets[i] = tmp[i];
+            }
+
+            clients->sockets[i] = client_socket;
+
+            clients->sockets_i = (clients->sockets_len++)-1;
+
+            free(tmp);
         }
+
+        printf("new socket: %d\n", client_socket);
+
+        handle_connection_param_t* param;
+        param = malloc(sizeof(handle_connection_param_t));
+        param->client_socket = client_socket;
+        param->semaphores = semaphores;
+        param->clients = clients;
+        
+        pthread_create(
+            &client_handler,
+            NULL,
+            (void *) &client_handler_f,
+            (void *) param
+        );
     }
 
     exit_handler(0);
 
     return 0;
+}
+
+void client_handler_f(handle_connection_param_t* param) {
+    handle_connection(param);
+    close(param->client_socket);
 }
 
 void read_thread_f(read_thread_param_t* param) {
@@ -153,18 +201,28 @@ void read_thread_f(read_thread_param_t* param) {
     receive_packet_param->socket = param->socket;
     receive_packet_param->state = STREAMING_STATE_WAITING;
     receive_packet_param->semaphores = param->semaphores;
+    receive_packet_param->clients = param->clients;
 
     receive_packet(receive_packet_param);
-    free_receive_packet_param(receive_packet_param);
 }
 
 void write_thread_f(write_thread_param_t* param) {
-    uint16_t _sign = PACKET_SIGNATURE;
-    send(param->socket, &_sign, PACKET_SIGNATURE_LEN, 0);
-    send(param->socket, &param->state, 1, 0);
-    int _key_len = strlen(param->key);
-    send(param->socket, &_key_len, PACKET_KEY_SIZE_LEN, 0);
-    send(param->socket, param->key, _key_len, 0);
+    int _i = 0;
+    int _socket;
+
+    for (; _i < param->clients->sockets_len; _i++) {
+        _socket = param->clients->sockets[_i];
+        printf("socket: %d\n", _socket);
+
+        uint16_t _sign = PACKET_SIGNATURE;
+        send(_socket, &_sign, PACKET_SIGNATURE_LEN, 0);
+        send(_socket, &param->state, 1, 0);
+        int _key_len = strlen(param->key);
+        send(_socket, &_key_len, PACKET_KEY_SIZE_LEN, 0);
+        send(_socket, param->key, _key_len, 0);
+    }
+
+    free(param);
 }
 
 void handle_connection(handle_connection_param_t* param) {
@@ -174,6 +232,7 @@ void handle_connection(handle_connection_param_t* param) {
     read_thread_param = malloc(sizeof(read_thread_param_t));
     read_thread_param->socket = param->client_socket;
     read_thread_param->semaphores = param->semaphores;
+    read_thread_param->clients = param->clients;
 
     pthread_create(
         &read_thread,
@@ -185,8 +244,28 @@ void handle_connection(handle_connection_param_t* param) {
     pthread_join(read_thread, NULL);
 }
 
-void check_recv_result(ssize_t result) {
+void check_recv_result(receive_packet_param_t* param, ssize_t result) {
     if (result == 0) {
+        printf("client disconnected: %d\n", param->socket);
+        int* tmp = malloc((sizeof(int)*param->clients->sockets_len));
+        memcpy(tmp, param->clients->sockets, (param->clients->sockets_len*sizeof(int)));
+        free(param->clients->sockets);
+        param->clients->sockets = malloc((sizeof(int)*param->clients->sockets_len)-sizeof(int));
+
+        int i = 0;
+        int j = 0;
+
+        for (; i < param->clients->sockets_len; i++) {
+            if (tmp[i] != param->socket) {
+                param->clients->sockets[j++] = tmp[i];
+            }
+        }
+
+        param->clients->sockets_i = (--param->clients->sockets_len)-1;
+
+        free(tmp);
+        free(param);
+
         pthread_exit(NULL);
     }
 }
@@ -198,7 +277,7 @@ void receive_packet(receive_packet_param_t* param) {
         uint16_t packet_signature_buf;
 
         result = recv(param->socket, &packet_signature_buf, PACKET_SIGNATURE_LEN, MSG_WAITALL);
-        check_recv_result(result);
+        check_recv_result(param, result);
 
         if (!check_socket_op_result(&result)) return;
 
@@ -210,7 +289,7 @@ void receive_packet(receive_packet_param_t* param) {
         }
     } else if (param->state == STREAMING_STATE_DEFINING) {
         result = recv(param->socket, &param->data_len, PACKET_KEY_SIZE_LEN, MSG_WAITALL);
-        check_recv_result(result);
+        check_recv_result(param, result);
 
         if (!check_socket_op_result(&result)) return;
 
@@ -221,7 +300,7 @@ void receive_packet(receive_packet_param_t* param) {
         *(param->key_buf+param->data_len) = '\0';
 
         result = recv(param->socket, param->key_buf, param->data_len, MSG_WAITALL);
-        check_recv_result(result);
+        check_recv_result(param, result);
 
         param->state = STREAMING_STATE_CMD;
 
@@ -230,7 +309,7 @@ void receive_packet(receive_packet_param_t* param) {
         printf("key: %s\n", param->key_buf);
     } else if (param->state == STREAMING_STATE_CMD) {
         result = recv(param->socket, &param->cmd, PACKET_CMD_LEN, MSG_WAITALL);
-        check_recv_result(result);
+        check_recv_result(param, result);
 
         param->state = STREAMING_STATE_WAITING;
         if (!check_socket_op_result(&result)) return;
@@ -249,42 +328,54 @@ void receive_packet(receive_packet_param_t* param) {
 }
 
 void response_thread_f(receive_packet_param_t* param) {
-    sems_hash_t *_hash_item;
-    HASH_FIND_STR(param->semaphores, param->key_buf, _hash_item);
+    sems_hash_t *hash_item;
+
+    HASH_FIND_STR(*param->semaphores, param->key_buf, hash_item);
+
+    if (!hash_item) {
+        hash_item = (sems_hash_t *) malloc(sizeof(sems_hash_t));
+        strcpy(hash_item->name, param->key_buf);
+        hash_item->lock_num = 0;
+        hash_item->state = SEM_STATE_AVAILABLE;
+
+        pthread_mutex_lock(&mutex);
+
+        HASH_ADD_STR(*param->semaphores, name, hash_item);
+
+        pthread_mutex_unlock(&mutex);
+    }
 
     if (param->cmd == PACKET_CMD_RELEASE) {
         printf("CMD(%s): release\n", param->key_buf);
-        if (_hash_item != NULL) {
-            _hash_item->state = SEM_STATE_AVAILABLE;
+        
+        if (--hash_item->lock_num <= 0) {
+            hash_item->state = SEM_STATE_AVAILABLE;
+            hash_item->lock_num = 0;
+
+            pthread_t write_thread;
+
+            write_thread_param_t* write_thread_param;
+            write_thread_param = malloc(sizeof(write_thread_param_t));
+            write_thread_param->socket = param->socket;
+            write_thread_param->clients = param->clients;
+            write_thread_param->state = SEM_STATE_AVAILABLE;
+            write_thread_param->key = malloc(sizeof(char) * (strlen(param->key_buf)+1));
+            write_thread_param->key = strcpy(write_thread_param->key, param->key_buf);
+
+            pthread_create(
+                &write_thread,
+                NULL,
+                (void *) &write_thread_f,
+                (void *) write_thread_param
+            );
         }
     } else if (param->cmd == PACKET_CMD_ACQUIRE) {
         printf("CMD(%s): acquire\n", param->key_buf);
-        for (;;) {
-            if (_hash_item == NULL) {
-                HASH_FIND_STR(param->semaphores, param->key_buf, _hash_item);
-            }
 
-            if ((_hash_item != NULL) && (_hash_item->state == SEM_STATE_AVAILABLE)) {
-                break;
-            }
-        }
+        hash_item->lock_num++;
     }
 
-    pthread_t write_thread;
-
-    write_thread_param_t* write_thread_param;
-    write_thread_param = malloc(sizeof(write_thread_param_t));
-    write_thread_param->socket = param->socket;
-    write_thread_param->state = SEM_STATE_AVAILABLE;
-    write_thread_param->key = malloc(sizeof(char) * (strlen(param->key_buf)+1));
-    write_thread_param->key = strcpy(write_thread_param->key, param->key_buf);
-
-    pthread_create(
-        &write_thread,
-        NULL,
-        (void *) &write_thread_f,
-        (void *) write_thread_param
-    );
+    printf("lock_num: %d\n", hash_item->lock_num);
 }
 
 uint8_t check_socket_op_result(ssize_t* result) {
@@ -294,10 +385,6 @@ uint8_t check_socket_op_result(ssize_t* result) {
     }
 
     return 1;
-}
-
-void free_receive_packet_param(receive_packet_param_t* param) {
-    free(param->key_buf);
 }
 
 void exit_handler(int sig) {

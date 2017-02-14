@@ -54,15 +54,4 @@ var semserv = function (key, cmd) {
     socket.write(buffer);
 };
 
-var key = 'something-'+parseInt(Math.random()*10000);
-
-console.log('acquiring semaphore.. waiting for release..');
-semserv(key, PACKET_CMD_ACQUIRE);
-setTimeout(function () {
-    console.log('acquiring semaphore.. waiting for release..');
-    semserv(key, PACKET_CMD_ACQUIRE);
-}, 1000);
-setInterval(function () {
-    console.log('releasing semaphore..');
-    semserv(key, PACKET_CMD_RELEASE);
-}, 1500);
+module.exports.semserv = semserv;
