@@ -27,6 +27,15 @@ socket.on('data', function (data) {
     }
 
     var signature = data_buf.readUInt16LE(0);
+
+    if (signature != PACKET_SIGNATURE) {
+        return;
+    }
+
+    if (data_buf.length < 5) {
+        return;
+    }
+
     var state = data_buf.readUInt8(2);
     var key_len = data_buf.readUInt32LE(3);
 
@@ -39,9 +48,10 @@ socket.on('data', function (data) {
     console.log('RESPONSE: state='+state+', key_len='+key_len+', key='+key);
 
     if (state == SEM_STATE_AVAILABLE)  {
-        data_buf = new Buffer(0);
         console.log('RESPONSE: CONTINUE');
     }
+
+    data_buf = new Buffer(0);
 });
 
 var semserv = function (key, cmd) {
