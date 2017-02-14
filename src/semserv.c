@@ -330,7 +330,11 @@ void receive_packet(receive_packet_param_t* param) {
 void response_thread_f(receive_packet_param_t* param) {
     sems_hash_t *hash_item;
 
+    pthread_mutex_lock(&mutex);
+
     HASH_FIND_STR(*param->semaphores, param->key_buf, hash_item);
+    
+    pthread_mutex_lock(&mutex);
 
     if (!hash_item) {
         hash_item = (sems_hash_t *) malloc(sizeof(sems_hash_t));
